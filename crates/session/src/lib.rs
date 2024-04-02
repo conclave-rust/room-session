@@ -18,6 +18,8 @@ use crate::connection_quality::ConnectionQuality;
 use conclave_types::{ConnectionToLeader, Knowledge, Term};
 use connection_quality::QualityAssessment;
 
+const MINIMUM_LEADER_SWITCH_INTERVAL_FROM_VOTE: Duration = Duration::from_secs(2);
+
 /// ID or index for a room connection
 #[derive(Default, Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct ConnectionIndex(pub u16);
@@ -158,6 +160,7 @@ pub struct Room {
     pub term: Term,
     pub config: RoomConfig,
     pub latest_ping_timestamp: Option<Instant>,
+    latest_leader_switch_timestamp: Option<Instant>,
 }
 
 impl Default for Room {
@@ -169,6 +172,7 @@ impl Default for Room {
             term: Term(0),
             config: Default::default(),
             latest_ping_timestamp: None,
+            latest_leader_switch_timestamp: None,
         }
     }
 }
@@ -187,14 +191,19 @@ impl Room {
 
     /// checks if most connections, that are on the same term, has lost connection to leader
     fn has_most_lost_connection_to_leader(&self) -> bool {
-        self.connections
-            .iter()
-            .filter(|(_, connection)| {
-                connection.has_connection_host == ConnectionToLeader::Disconnected
-                    && connection.last_reported_term == self.term
+        self.latest_leader_switch_timestamp
+            .map_or(true, |timestamp| {
+                timestamp.elapsed() > MINIMUM_LEADER_SWITCH_INTERVAL_FROM_VOTE
             })
-            .count()
-            > self.connections.len() / 2
+            && self
+                .connections
+                .iter()
+                .filter(|(_, connection)| {
+                    connection.has_connection_host == ConnectionToLeader::Disconnected
+                        && connection.last_reported_term == self.term
+                })
+                .count()
+                > self.connections.len() / 2
     }
 
     fn connection_with_most_knowledge_and_acceptable_quality(
@@ -211,6 +220,14 @@ impl Room {
     fn switch_leader_to_best_knowledge_and_quality(&mut self) {
         self.leader_index =
             self.connection_with_most_knowledge_and_acceptable_quality(self.leader_index);
+
+        if self.leader_index.is_none() {
+            // Don't start a new term if we found no new leader
+            return;
+        }
+
+        self.latest_leader_switch_timestamp = Some(Instant::now());
+
         // We start a new term, since we have a new leader
         self.term.next();
     }
